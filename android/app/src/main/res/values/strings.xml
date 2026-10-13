@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">來電閃燈</string>
+    <string name="scan_devices">掃描設備</string>
+    <string name="test_flash">測試閃燈</string>
+    <string name="start_monitor">開始監聽來電</string>
+    <string name="stop_monitor">暫時停止監聽</string>
+    <string name="battery_opt">忽略電池優化</string>
+    <string name="status_idle">狀態：未連線</string>
+    <string name="status_scanning">狀態：掃描中…</string>
+    <string name="status_connecting">狀態：連線中…</string>
+    <string name="status_connected">狀態：已連線</string>
+    <string name="status_disconnected">狀態：已斷線</string>
+    <string name="status_connecting_lamp">正在連燈…</string>
+    <string name="status_reconnecting">燈斷線，正在重連…</string>
+    <string name="status_listening_connected">已在聽來電（燈已連線）</string>
+    <string name="selected_device">已選設備：%1$s</string>
+    <string name="no_device">尚未選擇設備</string>
+    <string name="monitor_need_device">監聽：請先掃描並選擇 CallFlash</string>
+    <string name="monitor_listening">監聽：已在聽來電</string>
+    <string name="monitor_connecting">監聽：正在連燈…</string>
+    <string name="monitor_paused">監聽：已暫時停止（再開 App 或重開機會自動恢復）</string>
+    <string name="notification_title">來電閃燈監聽中</string>
+    <string name="notification_text">來電時將透過 BLE 控制閃燈</string>
+    <string name="channel_name">來電監聽</string>
+    <string name="hint_auto">提示：首次掃描並點選名稱為 CallFlash 的設備後，之後會自動連燈並監聽來電，不用再按開始。通知列會長駐；從最近任務滑掉後會盡量自己回來。開機亦會自動啟動。請到設定關閉電池優化並開啟自啟動。</string>
+</resources>

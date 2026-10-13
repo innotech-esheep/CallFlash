@@ -1,0 +1,16 @@
+# Android / local
+**/local.properties
+**/.gradle/
+**/build/
+**/captures/
+**/*.apk
+**/*.aab
+**/*.keystore
+**/*.jks
+**/google-services.json
+.idea/
+*.iml
+.DS_Store
+
+# Arduino
+**/build/
