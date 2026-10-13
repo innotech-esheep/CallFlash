@@ -18,6 +18,17 @@ This project is published under the company name. The GitHub organization accoun
 
 本專案以公司名義公開。GitHub 組織帳號由本公司維護。
 
+
+## Concept / 概念圖
+
+![CallFlash concept 3D](docs/images/concept-3d.jpg)
+
+![CallFlash assembly layout](docs/images/concept-assembly.jpg)
+
+## Materials / 材料
+
+See bilingual BOM: [docs/MATERIALS.md](docs/MATERIALS.md)
+
 ## What’s inside / 內容
 
 - `firmware/CallFlash/CallFlash.ino` — Seeed XIAO ESP32-C3 firmware (LED data pin D9 / GPIO9)
