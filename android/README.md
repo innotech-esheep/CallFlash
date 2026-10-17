@@ -1,15 +1,11 @@
-# CallFlash（來電閃燈）
-
-**Innotech Electric Sheep Limited（創科電子羊有限公司）**  
-A company incorporated in the Macao Special Administrative Region of the People’s Republic of China（中華人民共和國澳門特別行政區註冊公司）。  
-Website: https://esheep.net · Email: info@esheep.net
+# 然仔乖孫（原 CallFlash／來電閃燈）
 
 來電時透過 BLE 控制 ESP32 閃燈的 Android 應用。
 
 - **套件名稱**：`com.esheep.callflash`
 - **適用機型**：黑鯊 4（JOYUI 13）、榮耀 Honor 90（MagicOS 9 / Android 15）及其他 Android 8.0+ 裝置
-- **建置產出**：`app/build/outputs/apk/debug/app-debug.apk`
-- **目前版本**：versionCode `2` / versionName `1.1.0`
+- **APK**：`artifacts/然仔乖孫-1.2.3-debug.apk`（或 `ranzi-guaisun-1.2.3-debug.apk`）
+- **目前版本**：versionCode `6` / versionName `1.2.3`（顯示名：然仔乖孫）
 
 ## BLE 協定
 
@@ -23,6 +19,13 @@ Website: https://esheep.net · Email: info@esheep.net
 | 寫入方式 | Write Without Response（優先） |
 
 來電狀態：`RINGING` → `0x01`；`IDLE` / `OFFHOOK` → `0x00`；響鈴期間每 10 秒可重送 `0x01`。
+
+## 1.2.3 變更
+
+- 顯示名：然仔乖孫；versionCode 6 / versionName 1.2.3
+- BLE 斷線指數退避重連（密集約 1 分鐘後拉長至最多約 10 分）
+- Android 15／榮耀 MagicOS：強制 APK v1+v2+v3 簽名，緩解「解析包時出現問題」
+- 前景服務維持 `connectedDevice`（Android 14+ FGS 類型）
 
 ## 自動連燈／自動監聽（1.1+）
 
@@ -62,7 +65,7 @@ App 啟動時安靜讀取：
 
 1. 將 `CallFlash-debug.apk` 傳到手機。
 2. 開啟 APK → 若提示「禁止安裝未知來源應用」，允許此來源安裝。
-3. 安裝完成後開啟「來電閃燈」。
+3. 安裝完成後開啟「然仔乖孫」。
 
 ## 首次設定
 
@@ -75,8 +78,8 @@ App 啟動時安靜讀取：
 
 ## 榮耀 / 黑鯊電池優化（重要）
 
-1. **電池／休眠時關閉應用活動**：將「來電閃燈」設為允許或不限制。
-2. **應用程式 → 來電閃燈 → 電池**：選 **不限制**。
+1. **電池／休眠時關閉應用活動**：將「然仔乖孫」設為允許或不限制。
+2. **應用程式 → 然仔乖孫 → 電池**：選 **不限制**。
 3. **自動啟動**：開啟。
 4. 多任務畫面可鎖定 App 卡片（仍可能被廠商清理；程式會盡量自己回來）。
 5. 保持前台服務通知不要手動清掉。
@@ -84,9 +87,11 @@ App 啟動時安靜讀取：
 ## 建置（本機）
 
 ```bash
-# Set JAVA_HOME (JDK 17) and ANDROID_HOME (Android SDK) first
+export JAVA_HOME=/home/box/jdk/jdk-17.0.13+11
+export ANDROID_HOME=/home/box/android-sdk
+cd /workspace/callflash-android
 ./gradlew :app:assembleDebug
-# APK: app/build/outputs/apk/debug/app-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk artifacts/CallFlash-debug.apk
 ```
 
 ## 疑難排解

@@ -11,13 +11,29 @@ android {
         applicationId = "com.esheep.callflash"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 6
+        versionName = "1.2.3"
+        // Pure Kotlin (no .so); documents Honor 90 arm64 expectation only.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+    }
+
+    // AGP omits v1 JAR signing when minSdk >= 24. Honor MagicOS PackageManager
+    // often fails sideload with「解析包時出現問題」on v2-only APKs — force v1+v2+v3.
+    signingConfigs {
+        getByName("debug") {
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Use debug keystore for sideload until a real release keystore exists.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -25,6 +41,7 @@ android {
         }
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

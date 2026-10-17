@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -15,6 +16,7 @@ import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 
 class CallMonitorService : Service() {
@@ -29,6 +31,8 @@ class CallMonitorService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var ringing = false
     private var intentionalStop = false
+    /** 斷線後重連嘗試序號；連上後歸零。 */
+    private var reconnectAttempt = 0
     private val resendRunnable = object : Runnable {
         override fun run() {
             if (ringing) {
@@ -36,6 +40,9 @@ class CallMonitorService : Service() {
                 handler.postDelayed(this, BleConstants.RESEND_INTERVAL_MS)
             }
         }
+    }
+    private val reconnectRunnable = Runnable {
+        if (!intentionalStop) connectSaved()
     }
 
     override fun onCreate() {
@@ -50,6 +57,7 @@ class CallMonitorService : Service() {
             }
             override fun onDeviceFound(device: android.bluetooth.BluetoothDevice, rssi: Int) {}
             override fun onConnected(device: android.bluetooth.BluetoothDevice) {
+                resetReconnectBackoff()
                 publishLink(connected = true, connecting = false)
                 updateNotification(getString(R.string.status_listening_connected))
             }
@@ -59,15 +67,35 @@ class CallMonitorService : Service() {
                 publishLink(connected = false, connecting = retry)
                 if (retry) {
                     updateNotification(getString(R.string.status_reconnecting))
-                    handler.postDelayed({
-                        if (!intentionalStop) ble.connect(mac!!)
-                    }, 3_000)
+                    scheduleReconnect()
+                } else {
+                    handler.removeCallbacks(reconnectRunnable)
                 }
             }
             override fun onWriteResult(ok: Boolean) {}
         }
         createChannel()
-        startForeground(BleConstants.NOTIF_ID, buildNotification(getString(R.string.notification_text)))
+        // Android 14+（targetSdk 34+）必須帶 FGS type；僅用 connectedDevice，
+        // 不可用 phoneCall（需撥號器／MANAGE_OWN_CALLS，否則 SecurityException 閃退）
+        try {
+            ServiceCompat.startForeground(
+                this,
+                BleConstants.NOTIF_ID,
+                buildNotification(getString(R.string.notification_text)),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed", e)
+            // 仍嘗試以舊 API 撐住，避免服務立刻死掉
+            try {
+                @Suppress("DEPRECATION")
+                startForeground(BleConstants.NOTIF_ID, buildNotification(getString(R.string.notification_text)))
+            } catch (e2: Exception) {
+                Log.e(TAG, "legacy startForeground also failed", e2)
+                stopSelf()
+                return
+            }
+        }
         connectSaved()
         registerPhoneListener()
     }
@@ -106,6 +134,7 @@ class CallMonitorService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(resendRunnable)
+        handler.removeCallbacks(reconnectRunnable)
         unregisterPhoneListener()
         if (ringing) {
             ble.flashStop()
@@ -132,14 +161,63 @@ class CallMonitorService : Service() {
             updateNotification(getString(R.string.no_device))
             return
         }
+        if (!ble.hasConnectPermission()) {
+            publishLink(connected = false, connecting = false)
+            updateNotification(getString(R.string.status_ble_permission))
+            Log.w(TAG, "skip connect: missing BLUETOOTH_CONNECT")
+            return
+        }
         if (ble.isConnected()) {
+            resetReconnectBackoff()
             publishLink(connected = true, connecting = false)
             updateNotification(getString(R.string.status_listening_connected))
             return
         }
+        // 主動連線前清掉排程，避免與 backoff 重疊雙連
+        handler.removeCallbacks(reconnectRunnable)
         publishLink(connected = false, connecting = true)
         updateNotification(getString(R.string.status_connecting_lamp))
-        ble.connect(mac)
+        try {
+            ble.connect(mac)
+        } catch (e: Exception) {
+            Log.e(TAG, "connectSaved failed", e)
+            val retry = !intentionalStop
+            publishLink(connected = false, connecting = retry)
+            updateNotification(
+                if (retry) getString(R.string.status_reconnecting)
+                else getString(R.string.status_connect_failed)
+            )
+            if (retry) scheduleReconnect()
+        }
+    }
+
+    /**
+     * 斷線自動重連：前約 1 分鐘較密（3–5s），其後 30s → 2 分 → 5 分，上限約 10 分。
+     * 連上後由 [resetReconnectBackoff] 回到密集模式。全自動，無新 UI。
+     */
+    private fun nextReconnectDelayMs(): Long {
+        val delay = when {
+            reconnectAttempt < 3 -> 3_000L
+            reconnectAttempt < 12 -> 5_000L // 約 3×3s + 9×5s ≈ 54s 密集期
+            reconnectAttempt == 12 -> 30_000L
+            reconnectAttempt == 13 -> 120_000L // 2 分
+            reconnectAttempt == 14 -> 300_000L // 5 分
+            else -> 600_000L // 上限約 10 分
+        }
+        reconnectAttempt++
+        return delay
+    }
+
+    private fun scheduleReconnect() {
+        handler.removeCallbacks(reconnectRunnable)
+        val delay = nextReconnectDelayMs()
+        Log.d(TAG, "schedule reconnect in ${delay}ms (nextAttemptIndex=$reconnectAttempt)")
+        handler.postDelayed(reconnectRunnable, delay)
+    }
+
+    private fun resetReconnectBackoff() {
+        reconnectAttempt = 0
+        handler.removeCallbacks(reconnectRunnable)
     }
 
     private fun onCallState(state: Int) {
@@ -168,6 +246,10 @@ class CallMonitorService : Service() {
             block()
         } else {
             val mac = prefs.mac ?: return
+            if (!ble.hasConnectPermission()) {
+                Log.w(TAG, "BLE not connected: no CONNECT permission")
+                return
+            }
             ble.connect(mac)
             handler.postDelayed({
                 if (ble.isConnected()) block() else Log.w(TAG, "BLE not connected for flash")
@@ -176,37 +258,47 @@ class CallMonitorService : Service() {
     }
 
     private fun registerPhoneListener() {
-        telephonyManager = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val cb = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
-                override fun onCallStateChanged(state: Int) {
-                    onCallState(state)
+        try {
+            telephonyManager = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val cb = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                    override fun onCallStateChanged(state: Int) {
+                        onCallState(state)
+                    }
                 }
-            }
-            modernCallback = cb
-            telephonyManager?.registerTelephonyCallback(mainExecutor, cb)
-        } else {
-            @Suppress("DEPRECATION")
-            val listener = object : PhoneStateListener() {
-                @Deprecated("Deprecated in Java")
-                override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-                    onCallState(state)
+                modernCallback = cb
+                telephonyManager?.registerTelephonyCallback(mainExecutor, cb)
+            } else {
+                @Suppress("DEPRECATION")
+                val listener = object : PhoneStateListener() {
+                    @Deprecated("Deprecated in Java")
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        onCallState(state)
+                    }
                 }
+                legacyListener = listener
+                @Suppress("DEPRECATION")
+                telephonyManager?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
             }
-            legacyListener = listener
-            @Suppress("DEPRECATION")
-            telephonyManager?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "registerPhoneListener SecurityException", e)
+            updateNotification("缺少電話權限，無法聽來電")
+        } catch (e: Exception) {
+            Log.e(TAG, "registerPhoneListener failed", e)
         }
     }
 
     private fun unregisterPhoneListener() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            modernCallback?.let { telephonyManager?.unregisterTelephonyCallback(it) }
-        } else {
-            @Suppress("DEPRECATION")
-            legacyListener?.let {
-                telephonyManager?.listen(it, PhoneStateListener.LISTEN_NONE)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                modernCallback?.let { telephonyManager?.unregisterTelephonyCallback(it) }
+            } else {
+                @Suppress("DEPRECATION")
+                legacyListener?.let {
+                    telephonyManager?.listen(it, PhoneStateListener.LISTEN_NONE)
+                }
             }
+        } catch (_: Exception) {
         }
         modernCallback = null
         legacyListener = null
@@ -248,8 +340,12 @@ class CallMonitorService : Service() {
     }
 
     private fun updateNotification(content: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(BleConstants.NOTIF_ID, buildNotification(content))
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(BleConstants.NOTIF_ID, buildNotification(content))
+        } catch (e: Exception) {
+            Log.w(TAG, "updateNotification failed", e)
+        }
     }
 
     companion object {
@@ -260,8 +356,12 @@ class CallMonitorService : Service() {
             val prefs = Prefs(context)
             if (!prefs.hasSavedDevice()) return
             prefs.monitorWanted = true
-            val intent = Intent(context, CallMonitorService::class.java)
-            ContextCompat.startForegroundService(context, intent)
+            try {
+                val intent = Intent(context, CallMonitorService::class.java)
+                ContextCompat.startForegroundService(context, intent)
+            } catch (e: Exception) {
+                Log.e(TAG, "startIfWanted failed", e)
+            }
         }
     }
 }
