@@ -11,8 +11,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.ArrayAdapter
@@ -37,9 +35,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var listDevices: ListView
 
     private lateinit var prefs: Prefs
+    /** 只負責掃描。已記住的燈由 [CallMonitorService] 獨佔 GATT。 */
     private lateinit var ble: BleController
     private lateinit var updateChecker: UpdateChecker
-    private val handler = Handler(Looper.getMainLooper())
 
     private data class FoundDevice(val mac: String, val name: String, val rssi: Int) {
         override fun toString(): String = "$name  [$mac]  ${rssi}dBm"
@@ -65,7 +63,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         prefs = Prefs(this)
-        ble = BleController(this)
+        ble = BleController(this, scanOnly = true)
         updateChecker = UpdateChecker(this)
 
         tvStatus = findViewById(R.id.tvStatus)
@@ -162,13 +160,9 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "請先選擇設備", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            // 測試用本頁 BLE；服務也會連同一盞燈
-            if (!ble.isConnected()) {
-                ble.connect(mac)
-                handler.postDelayed({ doTestFlash() }, 2500)
-            } else {
-                doTestFlash()
-            }
+            // 交給服務寫入。本頁再 connectGatt 會把服務從 ESP32 踢掉。
+            CallMonitorService.requestTestFlash(this)
+            Toast.makeText(this, "測試閃燈 2 秒…", Toast.LENGTH_SHORT).show()
         }
 
         btnStop.setOnClickListener {
@@ -265,14 +259,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun doTestFlash() {
-        ble.flashStart()
-        Toast.makeText(this, "測試閃燈 2 秒…", Toast.LENGTH_SHORT).show()
-        handler.postDelayed({
-            ble.flashStop()
-        }, BleConstants.TEST_FLASH_MS)
-    }
-
     private fun maybeAutoStartMonitor() {
         if (!prefs.hasSavedDevice()) {
             refreshMonitorStatus()
@@ -307,13 +293,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 連線狀態以背景服務為準。已連上就寫已連線，不要因為本頁沒有自己的 GATT 而顯示未連線。
+     * 連線狀態只看背景服務。本頁沒有自己的 GATT。
      */
     private fun refreshLinkStatus() {
         if (!::tvStatus.isInitialized || !::prefs.isInitialized) return
-        val activityConnected = ::ble.isInitialized && ble.isConnected()
         tvStatus.text = when {
-            LampLink.isConnected || activityConnected -> getString(R.string.status_connected)
+            LampLink.isConnected -> getString(R.string.status_connected)
             LampLink.isConnecting -> getString(R.string.status_connecting)
             prefs.hasSavedDevice() && prefs.monitorWanted -> getString(R.string.status_connecting)
             else -> getString(R.string.status_idle)
@@ -398,10 +383,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        // 服務自己管 BLE；本頁測試連線可釋放
+        // 只停掃描。不要動服務那條 GATT。
+        ble.listener = null
         ble.stopScan()
         ble.release()
-        handler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
 }
