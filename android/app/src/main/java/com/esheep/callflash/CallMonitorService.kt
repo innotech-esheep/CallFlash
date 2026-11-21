@@ -266,15 +266,18 @@ class CallMonitorService : Service() {
     }
 
     /**
-     * 斷線重連：前 3 次 3 秒、接著約 7 次 5 秒，之後固定 30 秒。
-     * 不再拉到 10 分鐘，避免燈已回來、來電卻要等很久或重開 App。
+     * 背景空閒重連間隔。[reconnectAttempt] 從 0 起算，先取延遲再加一，
+     * 所以第 1–3 次（< 3）3 秒、第 4–10 次（< 10）5 秒、第 11–20 次（< 20）30 秒，
+     * 第 20 次之後每 15 分鐘。30 秒不是最終上限。
+     * 響鈴、打開 App、[startIfWanted]、[connectSaved] 不經此函式，會立刻試連。
      * 連上後由 [resetReconnectBackoff] 回到密集模式。
      */
     private fun nextReconnectDelayMs(): Long {
         val delay = when {
             reconnectAttempt < 3 -> 3_000L
             reconnectAttempt < 10 -> 5_000L
-            else -> MAX_RECONNECT_DELAY_MS
+            reconnectAttempt < 20 -> RECONNECT_DELAY_30_S_MS
+            else -> IDLE_RECONNECT_DELAY_MS
         }
         reconnectAttempt++
         return delay
@@ -467,7 +470,10 @@ class CallMonitorService : Service() {
         const val ACTION_STOP = "com.esheep.callflash.STOP"
         const val ACTION_TEST = "com.esheep.callflash.TEST_FLASH"
         private const val TAG = "CallMonitorService"
-        private const val MAX_RECONNECT_DELAY_MS = 30_000L
+        /** 第 11–20 次空閒重連。其後改走 [IDLE_RECONNECT_DELAY_MS]，不是最終上限。 */
+        private const val RECONNECT_DELAY_30_S_MS = 30_000L
+        /** 第 20 次空閒重連之後的間隔（15 分鐘）。 */
+        private const val IDLE_RECONNECT_DELAY_MS = 15 * 60 * 1000L
         private const val FLASH_WAIT_MS = 20_000L
 
         fun startIfWanted(context: android.content.Context) {
