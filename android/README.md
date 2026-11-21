@@ -4,8 +4,8 @@
 
 - **套件名稱**：`com.esheep.callflash`
 - **適用機型**：黑鯊 4（JOYUI 13）、榮耀 Honor 90（MagicOS 9 / Android 15）及其他 Android 8.0+ 裝置
-- **APK**：`artifacts/然仔乖孫-1.2.4-debug.apk`（或 `ranzi-guaisun-1.2.4-debug.apk`）
-- **目前版本**：versionCode `7` / versionName `1.2.4`（顯示名：然仔乖孫）
+- **APK**：`artifacts/然仔乖孫-1.2.5-debug.apk`（或 `ranzi-guaisun-1.2.5-debug.apk`）
+- **目前版本**：versionCode `8` / versionName `1.2.5`（顯示名：然仔乖孫）
 
 ## BLE 協定
 
@@ -20,6 +20,14 @@
 
 來電狀態：`RINGING` → `0x01`；`IDLE` / `OFFHOOK` → `0x00`；響鈴期間每 10 秒可重送 `0x01`。
 
+## 1.2.5 變更
+
+背景空閒重連在前 20 次之後改為每 15 分鐘，減少手機出街、燈留在家時的耗電。1.2.4 的 GATT close、主動斷線後再 close、測試閃燈走服務、寫入失敗重連都保留。
+
+- 空閒重連（`reconnectAttempt` 從 0 起算，先取間隔再加一）：第 1–3 次 3 秒、第 4–10 次 5 秒、第 11–20 次 30 秒，第 20 次之後 `15 * 60 * 1000` 毫秒。
+- 響鈴中若還沒連上，仍立刻試連，連上後補閃；打開 App、`startIfWanted`、`connectSaved` 也仍立刻試連，不等 15 分鐘。
+- versionCode `8` / versionName `1.2.5`。韌體未改。
+
 ## 1.2.4 變更
 
 斷線後來電不閃、必須重開 App 的修復（不需重刷 ESP32）：
@@ -28,7 +36,7 @@
 - 主動斷線改為先 `disconnect()`、等 `STATE_DISCONNECTED`（最多約 2 秒）再 `close()`。
 - 只有背景服務會連已記住的燈。「測試閃燈」改交服務，畫面不再對同一 MAC `connectGatt`。
 - 響鈴中若剛好連上會補送開始閃；每 10 秒重送時若未連線會先重連；寫入失敗會觸發重連。
-- 重連間隔維持前段 3 秒／5 秒，其後最長 **30 秒**（不再拉到 10 分鐘）。
+- 重連間隔維持前段 3 秒／5 秒，其後為 30 秒（1.2.4 不再拉到 10 分鐘；最終上限改見 1.2.5）。
 
 ## 1.2.3 變更
 
@@ -101,12 +109,12 @@ export JAVA_HOME=/home/box/jdk/jdk-17.0.13+11
 export ANDROID_HOME=/home/box/android-sdk
 cd android
 ./gradlew :app:assembleDebug
-cp app/build/outputs/apk/debug/app-debug.apk artifacts/然仔乖孫-1.2.4-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk artifacts/然仔乖孫-1.2.5-debug.apk
 ```
 
 ## 疑難排解
 
 - 掃描不到：確認藍牙已開、ESP32 在廣播、距離夠近。
 - 測試無反應：確認已選對設備；檢查 UUID 是否與韌體一致。
-- 來電不閃：確認通知仍在。1.2.4 起燈斷線會在約 30 秒內自己重連，不必為了閃燈重開 App。仍請關閉電池優化並開自啟動。
+- 來電不閃：確認通知仍在。1.2.4 起斷線會自己重連，不必為了閃燈重開 App。1.2.5 起背景空閒重連前 20 次仍是 3 秒／5 秒／30 秒，第 20 次之後改為每 15 分鐘；響鈴或打開 App 仍會立刻試連。仍請關閉電池優化並開自啟動。
 - 滑掉後失效：屬廠商限制；重開 App 或重開機會再自動拉起（若未按暫時停止）。
