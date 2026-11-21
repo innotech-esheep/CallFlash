@@ -4,8 +4,8 @@
 
 - **套件名稱**：`com.esheep.callflash`
 - **適用機型**：黑鯊 4（JOYUI 13）、榮耀 Honor 90（MagicOS 9 / Android 15）及其他 Android 8.0+ 裝置
-- **APK**：`artifacts/然仔乖孫-1.2.3-debug.apk`（或 `ranzi-guaisun-1.2.3-debug.apk`）
-- **目前版本**：versionCode `6` / versionName `1.2.3`（顯示名：然仔乖孫）
+- **APK**：`artifacts/然仔乖孫-1.2.4-debug.apk`（或 `ranzi-guaisun-1.2.4-debug.apk`）
+- **目前版本**：versionCode `7` / versionName `1.2.4`（顯示名：然仔乖孫）
 
 ## BLE 協定
 
@@ -19,6 +19,16 @@
 | 寫入方式 | Write Without Response（優先） |
 
 來電狀態：`RINGING` → `0x01`；`IDLE` / `OFFHOOK` → `0x00`；響鈴期間每 10 秒可重送 `0x01`。
+
+## 1.2.4 變更
+
+斷線後來電不閃、必須重開 App 的修復（不需重刷 ESP32）：
+
+- 斷線、連線失敗、服務探索失敗都會 `close()` GATT 並通知服務重連（避免 status 133 把客戶端卡住）。
+- 主動斷線改為先 `disconnect()`、等 `STATE_DISCONNECTED`（最多約 2 秒）再 `close()`。
+- 只有背景服務會連已記住的燈。「測試閃燈」改交服務，畫面不再對同一 MAC `connectGatt`。
+- 響鈴中若剛好連上會補送開始閃；每 10 秒重送時若未連線會先重連；寫入失敗會觸發重連。
+- 重連間隔維持前段 3 秒／5 秒，其後最長 **30 秒**（不再拉到 10 分鐘）。
 
 ## 1.2.3 變更
 
@@ -89,14 +99,14 @@ App 啟動時安靜讀取：
 ```bash
 export JAVA_HOME=/home/box/jdk/jdk-17.0.13+11
 export ANDROID_HOME=/home/box/android-sdk
-cd /workspace/callflash-android
+cd android
 ./gradlew :app:assembleDebug
-cp app/build/outputs/apk/debug/app-debug.apk artifacts/CallFlash-debug.apk
+cp app/build/outputs/apk/debug/app-debug.apk artifacts/然仔乖孫-1.2.4-debug.apk
 ```
 
 ## 疑難排解
 
 - 掃描不到：確認藍牙已開、ESP32 在廣播、距離夠近。
 - 測試無反應：確認已選對設備；檢查 UUID 是否與韌體一致。
-- 來電不閃：確認通知仍在、狀態為「已在聽」；再檢查電池優化／自動啟動。
+- 來電不閃：確認通知仍在。1.2.4 起燈斷線會在約 30 秒內自己重連，不必為了閃燈重開 App。仍請關閉電池優化並開自啟動。
 - 滑掉後失效：屬廠商限制；重開 App 或重開機會再自動拉起（若未按暫時停止）。

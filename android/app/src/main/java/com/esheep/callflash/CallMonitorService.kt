@@ -31,18 +31,50 @@ class CallMonitorService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var ringing = false
     private var intentionalStop = false
+    private var destroyed = false
     /** 斷線後重連嘗試序號；連上後歸零。 */
     private var reconnectAttempt = 0
+    private var reconnectScheduled = false
+    /** 連上後要補送的閃燈（測試或響鈴）。響鈴中一律改送開始閃。 */
+    private var pendingOnConnect: (() -> Unit)? = null
+    /** true 表示 pending 只為這通響鈴；掛斷後清掉，避免通話結束才補閃。 */
+    private var pendingIsRing = false
+    private var flashWaitTries = 0
     private val resendRunnable = object : Runnable {
         override fun run() {
-            if (ringing) {
+            if (!ringing || destroyed) return
+            if (ble.isConnected()) {
                 ble.flashStart()
-                handler.postDelayed(this, BleConstants.RESEND_INTERVAL_MS)
+            } else {
+                ensureConnectedThen(forRing = true) { if (ringing) ble.flashStart() }
             }
+            handler.postDelayed(this, BleConstants.RESEND_INTERVAL_MS)
         }
     }
     private val reconnectRunnable = Runnable {
-        if (!intentionalStop) connectSaved()
+        reconnectScheduled = false
+        if (!intentionalStop && !destroyed && prefs.monitorWanted && prefs.hasSavedDevice()) {
+            connectSaved()
+        }
+    }
+    private val testStopRunnable = Runnable {
+        if (!ringing && !destroyed) ble.flashStop()
+    }
+    private val flashWaitTimeout = object : Runnable {
+        override fun run() {
+            if (destroyed || ble.isConnected()) return
+            if (pendingOnConnect == null && !ringing) return
+            flashWaitTries++
+            if (flashWaitTries > 5) {
+                Log.w(TAG, "flash wait exceeded; reconnect loop keeps trying")
+                return
+            }
+            Log.w(TAG, "lamp still down while flash is pending")
+            if (!reconnectScheduled && !ble.isLinkBusy() && !intentionalStop && prefs.monitorWanted) {
+                connectSaved()
+            }
+            handler.postDelayed(this, FLASH_WAIT_MS)
+        }
     }
 
     override fun onCreate() {
@@ -60,19 +92,43 @@ class CallMonitorService : Service() {
                 resetReconnectBackoff()
                 publishLink(connected = true, connecting = false)
                 updateNotification(getString(R.string.status_listening_connected))
+                handler.removeCallbacks(flashWaitTimeout)
+                flashWaitTries = 0
+                val pending = pendingOnConnect
+                val ringPending = pendingIsRing
+                pendingOnConnect = null
+                pendingIsRing = false
+                // 連上時若還在響，補送開始閃；測試閃燈只在沒在響時送。
+                if (ringing) {
+                    ble.flashStart()
+                } else if (pending != null && !ringPending) {
+                    pending()
+                }
             }
             override fun onDisconnected() {
-                val mac = prefs.mac
-                val retry = !intentionalStop && mac != null
+                if (destroyed) return
+                val retry = !intentionalStop && prefs.monitorWanted && prefs.hasSavedDevice()
                 publishLink(connected = false, connecting = retry)
                 if (retry) {
                     updateNotification(getString(R.string.status_reconnecting))
                     scheduleReconnect()
                 } else {
+                    reconnectScheduled = false
                     handler.removeCallbacks(reconnectRunnable)
                 }
             }
-            override fun onWriteResult(ok: Boolean) {}
+            override fun onWriteResult(ok: Boolean) {
+                if (ok || destroyed || intentionalStop || !prefs.monitorWanted) return
+                handler.post {
+                    if (destroyed || intentionalStop || !prefs.monitorWanted) return@post
+                    Log.w(TAG, "write failed while monitoring; reconnect")
+                    if (ble.isConnected()) {
+                        ble.disconnect()
+                    } else if (!reconnectScheduled && !ble.isLinkBusy()) {
+                        scheduleReconnect()
+                    }
+                }
+            }
         }
         createChannel()
         // Android 14+（targetSdk 34+）必須帶 FGS type；僅用 connectedDevice，
@@ -108,6 +164,13 @@ class CallMonitorService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
+            ACTION_TEST -> {
+                if (prefs.hasSavedDevice()) {
+                    prefs.monitorWanted = true
+                    beginTestFlash()
+                }
+                return START_STICKY
+            }
         }
         // 被系統拉起或 START_STICKY 重啟時再連一次
         if (prefs.hasSavedDevice()) {
@@ -133,12 +196,19 @@ class CallMonitorService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         handler.removeCallbacks(resendRunnable)
         handler.removeCallbacks(reconnectRunnable)
+        handler.removeCallbacks(testStopRunnable)
+        handler.removeCallbacks(flashWaitTimeout)
+        pendingOnConnect = null
+        pendingIsRing = false
         unregisterPhoneListener()
         if (ringing) {
+            ringing = false
             ble.flashStop()
         }
+        ble.listener = null
         ble.release()
         if (LampLink.owner == session) {
             LampLink.publish(this, connected = false, connecting = false)
@@ -175,13 +245,17 @@ class CallMonitorService : Service() {
         }
         // 主動連線前清掉排程，避免與 backoff 重疊雙連
         handler.removeCallbacks(reconnectRunnable)
+        reconnectScheduled = false
         publishLink(connected = false, connecting = true)
         updateNotification(getString(R.string.status_connecting_lamp))
-        try {
+        val accepted = try {
             ble.connect(mac)
         } catch (e: Exception) {
             Log.e(TAG, "connectSaved failed", e)
-            val retry = !intentionalStop
+            false
+        }
+        if (!accepted) {
+            val retry = !intentionalStop && !destroyed && prefs.monitorWanted
             publishLink(connected = false, connecting = retry)
             updateNotification(
                 if (retry) getString(R.string.status_reconnecting)
@@ -192,31 +266,32 @@ class CallMonitorService : Service() {
     }
 
     /**
-     * 斷線自動重連：前約 1 分鐘較密（3–5s），其後 30s → 2 分 → 5 分，上限約 10 分。
-     * 連上後由 [resetReconnectBackoff] 回到密集模式。全自動，無新 UI。
+     * 斷線重連：前 3 次 3 秒、接著約 7 次 5 秒，之後固定 30 秒。
+     * 不再拉到 10 分鐘，避免燈已回來、來電卻要等很久或重開 App。
+     * 連上後由 [resetReconnectBackoff] 回到密集模式。
      */
     private fun nextReconnectDelayMs(): Long {
         val delay = when {
             reconnectAttempt < 3 -> 3_000L
-            reconnectAttempt < 12 -> 5_000L // 約 3×3s + 9×5s ≈ 54s 密集期
-            reconnectAttempt == 12 -> 30_000L
-            reconnectAttempt == 13 -> 120_000L // 2 分
-            reconnectAttempt == 14 -> 300_000L // 5 分
-            else -> 600_000L // 上限約 10 分
+            reconnectAttempt < 10 -> 5_000L
+            else -> MAX_RECONNECT_DELAY_MS
         }
         reconnectAttempt++
         return delay
     }
 
     private fun scheduleReconnect() {
+        if (destroyed || intentionalStop || !prefs.monitorWanted || !prefs.hasSavedDevice()) return
         handler.removeCallbacks(reconnectRunnable)
         val delay = nextReconnectDelayMs()
-        Log.d(TAG, "schedule reconnect in ${delay}ms (nextAttemptIndex=$reconnectAttempt)")
+        reconnectScheduled = true
+        Log.d(TAG, "schedule reconnect in ${delay}ms (attempt=$reconnectAttempt)")
         handler.postDelayed(reconnectRunnable, delay)
     }
 
     private fun resetReconnectBackoff() {
         reconnectAttempt = 0
+        reconnectScheduled = false
         handler.removeCallbacks(reconnectRunnable)
     }
 
@@ -225,7 +300,8 @@ class CallMonitorService : Service() {
             TelephonyManager.CALL_STATE_RINGING -> {
                 if (!ringing) {
                     ringing = true
-                    ensureConnectedThen { ble.flashStart() }
+                    handler.removeCallbacks(testStopRunnable)
+                    ensureConnectedThen(forRing = true) { if (ringing) ble.flashStart() }
                     handler.removeCallbacks(resendRunnable)
                     handler.postDelayed(resendRunnable, BleConstants.RESEND_INTERVAL_MS)
                 }
@@ -235,25 +311,64 @@ class CallMonitorService : Service() {
                 if (ringing || state == TelephonyManager.CALL_STATE_OFFHOOK) {
                     ringing = false
                     handler.removeCallbacks(resendRunnable)
-                    ble.flashStop()
+                    if (pendingIsRing) {
+                        pendingOnConnect = null
+                        pendingIsRing = false
+                        handler.removeCallbacks(flashWaitTimeout)
+                    }
+                    if (ble.isConnected()) {
+                        ble.flashStop()
+                    } else if (
+                        !reconnectScheduled && !ble.isLinkBusy() &&
+                        prefs.monitorWanted && !intentionalStop && !destroyed
+                    ) {
+                        scheduleReconnect()
+                    }
                 }
             }
         }
     }
 
-    private fun ensureConnectedThen(block: () -> Unit) {
+    /**
+     * 已連上就立刻做；否則先連，等 [BleController.Listener.onConnected] 再做。
+     * 另加較長的等待，連線 callback 沒來時會再踢一次，而不是只等 2 秒就放棄。
+     */
+    private fun ensureConnectedThen(forRing: Boolean = false, block: () -> Unit) {
+        if (destroyed) return
         if (ble.isConnected()) {
             block()
-        } else {
-            val mac = prefs.mac ?: return
-            if (!ble.hasConnectPermission()) {
-                Log.w(TAG, "BLE not connected: no CONNECT permission")
-                return
+            return
+        }
+        pendingOnConnect = block
+        pendingIsRing = forRing
+        flashWaitTries = 0
+        val mac = prefs.mac
+        if (mac.isNullOrBlank() || !ble.hasConnectPermission()) {
+            Log.w(TAG, "BLE not connected: missing device or CONNECT permission")
+            if (!forRing) {
+                pendingOnConnect = null
+                pendingIsRing = false
             }
-            ble.connect(mac)
-            handler.postDelayed({
-                if (ble.isConnected()) block() else Log.w(TAG, "BLE not connected for flash")
-            }, 2_000)
+            return
+        }
+        connectSaved()
+        handler.removeCallbacks(flashWaitTimeout)
+        handler.postDelayed(flashWaitTimeout, FLASH_WAIT_MS)
+    }
+
+    /** 測試閃燈走服務的 GATT，不在 Activity 另開一條連線。 */
+    private fun beginTestFlash() {
+        if (destroyed || !prefs.hasSavedDevice()) return
+        if (ringing) {
+            ensureConnectedThen(forRing = true) { if (ringing) ble.flashStart() }
+            return
+        }
+        ensureConnectedThen {
+            ble.flashStart()
+            if (!ringing) {
+                handler.removeCallbacks(testStopRunnable)
+                handler.postDelayed(testStopRunnable, BleConstants.TEST_FLASH_MS)
+            }
         }
     }
 
@@ -350,7 +465,10 @@ class CallMonitorService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.esheep.callflash.STOP"
+        const val ACTION_TEST = "com.esheep.callflash.TEST_FLASH"
         private const val TAG = "CallMonitorService"
+        private const val MAX_RECONNECT_DELAY_MS = 30_000L
+        private const val FLASH_WAIT_MS = 20_000L
 
         fun startIfWanted(context: android.content.Context) {
             val prefs = Prefs(context)
@@ -361,6 +479,16 @@ class CallMonitorService : Service() {
                 ContextCompat.startForegroundService(context, intent)
             } catch (e: Exception) {
                 Log.e(TAG, "startIfWanted failed", e)
+            }
+        }
+
+        /** 測試閃燈：只讓服務連已記住的燈，Activity 不得再 connectGatt。 */
+        fun requestTestFlash(context: android.content.Context) {
+            try {
+                val intent = Intent(context, CallMonitorService::class.java).setAction(ACTION_TEST)
+                ContextCompat.startForegroundService(context, intent)
+            } catch (e: Exception) {
+                Log.e(TAG, "requestTestFlash failed", e)
             }
         }
     }
